@@ -3,8 +3,7 @@ services:
     build: .
     env_file: .env
     volumes:
-      - activity_data:/app/data     # keeps activity.db persistent
+      - ./data:/app/data  # bind mount to local ./data folder
     restart: unless-stopped
 
-volumes:
-  activity_data:
+volumes: {}
