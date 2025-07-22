@@ -1,0 +1,10 @@
+services:
+  game-stat-bot:
+    build: .
+    env_file: .env
+    volumes:
+      - activity_data:/app/data     # keeps activity.db persistent
+    restart: unless-stopped
+
+volumes:
+  activity_data:
