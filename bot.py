@@ -15,9 +15,10 @@ from typing import Dict, List
 import aiosqlite
 import discord
 from collections.abc import Coroutine
-from collections.abc import Awaitable
+from typing import Callable, Awaitable
 from discord.ext import commands
 from dotenv import load_dotenv
+from zoneinfo import ZoneInfo
 
 # ── logging setup ----------------------------------------------------------
 logging.basicConfig(
@@ -110,6 +111,9 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
             await bot.db.executemany("INSERT INTO activity VALUES (?,?,?,?,?)", rows)
 
         # END sessions (map keys to activities to get proper name)
+        
+        TZ = ZoneInfo("Asia/Singapore")
+
         for act in before_acts:
             k = activity_key(act)
             if k in ended:
@@ -128,8 +132,8 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
                     try:
                         channel = bot.get_channel(ANNOUNCE_CHANNEL_ID)
                         if channel:
-                            start_str = start_ts.strftime("%Y-%m-%d %H:%M:%S")
-                            end_str = ts_now.strftime("%Y-%m-%d %H:%M:%S")
+                            start_str = start_ts.astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
+                            end_str = ts_now.astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
                             await channel.send(
                                 f"**{after.display_name}** finished **{name}**.\n"
                                 f"▶️ Duration: `{pretty(secs)}`\n"
@@ -141,16 +145,20 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
         await bot.db.commit()
 
 # ── slash commands logging wrapper -----------------------------------------
-async def log_wrap(inter: discord.Interaction, name: str, coro: Awaitable[None]):
+from discord.errors import InteractionResponded, NotFound
+
+async def log_wrap(inter: discord.Interaction, name: str, coro_fn: Callable[[], Awaitable[None]]):
     user = inter.user.display_name
     log.info("/%s invoked by %s", name, user)
 
     try:
-        # Defer early if not deferred yet
-        if not inter.response.is_done():
-            await inter.response.defer(ephemeral=True)
+        try:
+            if not inter.response.is_done():
+                await inter.response.defer(ephemeral=True)
+        except (InteractionResponded, NotFound):
+            log.warning("Interaction already responded or expired for /%s", name)
 
-        await coro
+        await coro_fn()
         log.info("/%s finished for %s", name, user)
 
     except Exception:
@@ -160,12 +168,12 @@ async def log_wrap(inter: discord.Interaction, name: str, coro: Awaitable[None])
         except Exception:
             pass
 
-
 @tree.command(name="ping", description="Latency check")
 async def ping_slash(inter: discord.Interaction):
     async def _impl():
         await inter.followup.send(f"Pong! `{round(bot.latency * 1000)} ms`", ephemeral=True)
-    await log_wrap(inter, "ping", _impl())
+
+    await log_wrap(inter, "ping", _impl)
 
 
 @tree.command(name="uptime", description="Bot uptime")
@@ -173,32 +181,30 @@ async def uptime_slash(inter: discord.Interaction):
     async def _impl():
         delta = datetime.now(timezone.utc) - launch_time
         await inter.followup.send(f"Uptime: `{pretty(int(delta.total_seconds()))}`", ephemeral=True)
-    await log_wrap(inter, "uptime", _impl())
+
+    await log_wrap(inter, "uptime", _impl)
 
 
 @tree.command(name="lastgame", description="Most‑recent activity & duration")
 async def lastgame_slash(inter: discord.Interaction, member: discord.Member | None = None):
     async def _impl():
-        await inter.response.defer(ephemeral=True)
         target = member or inter.user
 
-        # active session query
         async with bot.db.execute(
             """SELECT game, started, ended, seconds
-                 FROM activity
-                WHERE user_id = ? AND ended IS NULL
-             ORDER BY started DESC LIMIT 1""",
+               FROM activity
+               WHERE user_id = ? AND ended IS NULL
+               ORDER BY started DESC LIMIT 1""",
             (target.id,),
         ) as cur:
             row = await cur.fetchone()
 
-        # fallback to most recent finished
         if row is None:
             async with bot.db.execute(
                 """SELECT game, started, ended, seconds
-                     FROM activity
-                    WHERE user_id = ?
-                 ORDER BY started DESC LIMIT 1""",
+                   FROM activity
+                   WHERE user_id = ?
+                   ORDER BY started DESC LIMIT 1""",
                 (target.id,),
             ) as cur:
                 row = await cur.fetchone()
@@ -208,11 +214,13 @@ async def lastgame_slash(inter: discord.Interaction, member: discord.Member | No
 
         game, started_str, ended_str, secs = row
         start_dt = datetime.fromisoformat(started_str)
+
         if ended_str is None:
             secs = int((datetime.now(timezone.utc) - start_dt).total_seconds())
             suffix = " (still running)"
         else:
             suffix = ""
+
         start_fmt = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         if ended_str:
             end_dt = datetime.fromisoformat(ended_str)
@@ -226,7 +234,7 @@ async def lastgame_slash(inter: discord.Interaction, member: discord.Member | No
             ephemeral=True,
         )
 
-    await log_wrap(inter, "lastgame", _impl())
+    await log_wrap(inter, "lastgame", _impl)
 
 # ── startup -----------------------------------------------------------------
 @bot.event
