@@ -14,10 +14,12 @@ from typing import Dict, List
 
 import aiosqlite
 import discord
+from collections.abc import Coroutine
+from typing import Callable, Awaitable
 from discord.ext import commands
 from discord import app_commands, TextChannel
-from discord.interactions import Interaction
 from dotenv import load_dotenv
+from zoneinfo import ZoneInfo
 
 # ── logging setup ----------------------------------------------------------
 logging.basicConfig(
@@ -29,12 +31,14 @@ log = logging.getLogger("gamestat")
 # ── config & DB setup ------------------------------------------------------
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+ANNOUNCE_CHANNEL_ID = int(os.getenv("ANNOUNCE_CHANNEL_ID", "123456789012345678"))
 
 DB_PATH = pathlib.Path("data/activity.db")
 DB_PATH.parent.mkdir(exist_ok=True)
 if not DB_PATH.exists():
     with sqlite3.connect(DB_PATH) as _db:
-        _db.executescript("""
+        _db.executescript(
+            """
             CREATE TABLE IF NOT EXISTS activity(
               user_id INTEGER,
               game    TEXT,
@@ -43,14 +47,16 @@ if not DB_PATH.exists():
               seconds INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_user ON activity(user_id);
-
-            CREATE TABLE IF NOT EXISTS guild_settings(
-              guild_id          INTEGER PRIMARY KEY,
-              notify_channel_id INTEGER,
-              timezone_offset   INTEGER DEFAULT 0
-            );
         """)
 log.info("DB initialized at %s", DB_PATH)
+
+
+            # CREATE TABLE IF NOT EXISTS guild_settings(
+            #   guild_id          INTEGER,
+            #   notify_channel_id INTEGER,
+            #   timezone_offset   INTEGER DEFAULT 0
+            # );
+            # CREATE INDEX IF NOT EXISTS idx_guild ON guild_settings(guild_id);
 
 # ── bot & intents ----------------------------------------------------------
 intents = discord.Intents.default()
@@ -122,23 +128,32 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
 
                 # fetch this guild's settings
                 guild_id = after.guild.id
-                async with bot.db.execute(
-                    "SELECT notify_channel_id, timezone_offset FROM guild_settings WHERE guild_id=?",
-                    (guild_id,),
-                ) as cur:
-                    row = await cur.fetchone()
-                if row and row[0]:
-                    channel_id, offset = row
-                    channel = bot.get_channel(channel_id)
-                    if channel:
-                        local_tz = timezone(timedelta(hours=offset))
-                        start_local = start_ts.replace(tzinfo=timezone.utc).astimezone(local_tz)
-                        end_local   = ts_now.replace(tzinfo=timezone.utc).astimezone(local_tz)
-                        await channel.send(
-                            f"**{after.display_name}** finished **{act.name}**.\n"
-                            f"▶️ Duration: `{pretty(secs)}`\n"
-                            f"🕒 From `{start_local:%Y-%m-%d %H:%M:%S}` to `{end_local:%Y-%m-%d %H:%M:%S}` (UTC{offset:+d})"
-                        )
+                # async with bot.db.execute(
+                #     "SELECT notify_channel_id, timezone_offset FROM guild_settings WHERE guild_id=?",
+                #     (guild_id,),
+                # ) as cur:
+                #     row = await cur.fetchone()
+                # if row and row[0]:
+                #     channel_id, offset = row
+                #     channel = bot.get_channel(channel_id)
+                #     if channel:
+                #         local_tz = timezone(timedelta(hours=offset))
+                #         start_local = start_ts.replace(tzinfo=timezone.utc).astimezone(local_tz)
+                #         end_local   = ts_now.replace(tzinfo=timezone.utc).astimezone(local_tz)
+                #         await channel.send(
+                #             f"**{after.display_name}** finished **{act.name}**.\n"
+                #             f"▶️ Duration: `{pretty(secs)}`\n"
+                #             f"🕒 From `{start_local:%Y-%m-%d %H:%M:%S}` to `{end_local:%Y-%m-%d %H:%M:%S}` (UTC{offset:+d})"
+                #         )
+                channel = bot.get_channel(828569302465904650)
+                local_tz = timezone(timedelta(hours=8))
+                start_local = start_ts.replace(tzinfo=timezone.utc).astimezone(local_tz)
+                end_local   = ts_now.replace(tzinfo=timezone.utc).astimezone(local_tz)
+                await channel.send(
+                    f"**{after.display_name}** finished **{act.name}**.\n"
+                    f"▶️ Duration: `{pretty(secs)}`\n"
+                    f"🕒 From `{start_local:%Y-%m-%d %H:%M:%S}` to `{end_local:%Y-%m-%d %H:%M:%S}` (UTC{8:+d})"
+                )
 
         await bot.db.commit()
 
@@ -150,7 +165,7 @@ class SettingGroup(app_commands.Group):
     @app_commands.command(name="channel", description="Notification channel")
     @app_commands.describe(channel="Where to post end‑of‑activity notices")
     @app_commands.checks.has_permissions(administrator=True)
-    async def channel(self, inter: Interaction, channel: TextChannel):
+    async def channel(self, inter: discord.Interaction, channel: TextChannel):
         await inter.response.defer(ephemeral=True)
         await bot.db.execute(
             """
@@ -162,12 +177,12 @@ class SettingGroup(app_commands.Group):
             (inter.guild.id, channel.id),
         )
         await bot.db.commit()
-        await inter.followup.send(f"✅ Notifications will post in {channel.mention}", ephemeral=True)
+        await inter.response.send_message(f"✅ Notifications will post in {channel.mention}", ephemeral=True)
 
     @app_commands.command(name="timezone", description="UTC offset in hours")
     @app_commands.describe(offset="Hours from UTC, e.g. +8 or -5")
     @app_commands.checks.has_permissions(administrator=True)
-    async def timezone(self, inter: Interaction, offset: int):
+    async def timezone(self, inter: discord.Interaction, offset: int):
         await inter.response.defer(ephemeral=True)
         await bot.db.execute(
             """
@@ -179,82 +194,79 @@ class SettingGroup(app_commands.Group):
             (inter.guild.id, offset),
         )
         await bot.db.commit()
-        await inter.followup.send(f"✅ Timezone offset set to UTC{offset:+d}", ephemeral=True)
+        await inter.response.send_message(f"✅ Timezone offset set to UTC{offset:+d}", ephemeral=True)
 
-bot.tree.add_command(SettingGroup())
+# bot.tree.add_command(SettingGroup())
 
 # ── simple slash commands --------------------------------------------------
 @tree.command(name="ping", description="Latency check")
 async def ping_slash(inter: discord.Interaction):
     try:
-        await inter.response.send_message(f"Pong! `{round(bot.latency * 1000)} ms`", ephemeral=True)
-    except:
+        await inter.response.send_message(f"Cok! `{round(bot.latency * 1000)} ms`")
+    except Exception:
         pass
+
 
 @tree.command(name="uptime", description="Bot uptime")
 async def uptime_slash(inter: discord.Interaction):
     try:
         delta = datetime.now(timezone.utc) - launch_time
         await inter.response.send_message(f"Uptime: `{pretty(int(delta.total_seconds()))}`", ephemeral=True)
-    except:
+    except Exception:
         pass
+
 
 @tree.command(name="lastgame", description="Most‑recent activity & duration")
 async def lastgame_slash(inter: discord.Interaction, member: discord.Member | None = None):
     try:
         target = member or inter.user
-        # fetch timezone offset
-        async with bot.db.execute(
-            "SELECT timezone_offset FROM guild_settings WHERE guild_id=?",
-            (inter.guild.id,),
-        ) as cur:
-            tz_row = await cur.fetchone()
-        offset = tz_row[0] if tz_row else 0
-        local_tz = timezone(timedelta(hours=offset))
+        TZ = ZoneInfo("Asia/Singapore")
 
         async with bot.db.execute(
-            """
-            SELECT game, started, ended, seconds
-              FROM activity
-             WHERE user_id = ? AND ended IS NULL
-          ORDER BY started DESC LIMIT 1
-            """,
+            """SELECT game, started, ended, seconds
+               FROM activity
+               WHERE user_id = ? AND ended IS NULL
+               ORDER BY started DESC LIMIT 1""",
             (target.id,),
         ) as cur:
             row = await cur.fetchone()
-        if not row:
+
+        if row is None:
             async with bot.db.execute(
-                """
-                SELECT game, started, ended, seconds
-                  FROM activity
-                 WHERE user_id = ?
-              ORDER BY started DESC LIMIT 1
-                """,
+                """SELECT game, started, ended, seconds
+                   FROM activity
+                   WHERE user_id = ?
+                   ORDER BY started DESC LIMIT 1""",
                 (target.id,),
             ) as cur:
                 row = await cur.fetchone()
-        if not row:
+
+        if row is None:
             return await inter.response.send_message("No sessions recorded yet.", ephemeral=True)
 
         game, started_str, ended_str, secs = row
-        start_utc = datetime.fromisoformat(started_str).replace(tzinfo=timezone.utc)
-        start_local = start_utc.astimezone(local_tz)
+        start_dt = datetime.fromisoformat(started_str).astimezone(TZ)
 
         if ended_str is None:
-            secs = int((datetime.now(timezone.utc) - start_utc).total_seconds())
+            secs = int((datetime.now(timezone.utc) - start_dt).total_seconds())
             suffix = " (still running)"
-            duration_msg = f"`{pretty(secs)}` since `{start_local:%Y-%m-%d %H:%M:%S}`"
         else:
-            end_utc   = datetime.fromisoformat(ended_str).replace(tzinfo=timezone.utc)
-            end_local = end_utc.astimezone(local_tz)
             suffix = ""
-            duration_msg = f"`{pretty(secs)}` from `{start_local:%Y-%m-%d %H:%M:%S}` to `{end_local:%Y-%m-%d %H:%M:%S}`"
+
+        start_fmt = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        if ended_str:
+            end_dt = datetime.fromisoformat(ended_str).astimezone(TZ)
+            end_fmt = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+            duration_msg = f"`{pretty(secs)}` from `{start_fmt}` to `{end_fmt}`"
+        else:
+            duration_msg = f"`{pretty(secs)}` since `{start_fmt}`"
 
         await inter.response.send_message(
             f"**{target.display_name}** spent {duration_msg} in **{game}** {suffix}",
             ephemeral=True,
         )
-    except:
+
+    except Exception:
         pass
 
 # ── startup -----------------------------------------------------------------
