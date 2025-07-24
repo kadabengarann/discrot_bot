@@ -47,16 +47,17 @@ if not DB_PATH.exists():
               seconds INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_user ON activity(user_id);
+            
+            CREATE TABLE IF NOT EXISTS guild_settings(
+              guild_id          INTEGER PRIMARY KEY,
+              notify_channel_id INTEGER,
+              timezone_offset   INTEGER DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_guild ON guild_settings(guild_id);
         """)
 log.info("DB initialized at %s", DB_PATH)
 
 
-            # CREATE TABLE IF NOT EXISTS guild_settings(
-            #   guild_id          INTEGER,
-            #   notify_channel_id INTEGER,
-            #   timezone_offset   INTEGER DEFAULT 0
-            # );
-            # CREATE INDEX IF NOT EXISTS idx_guild ON guild_settings(guild_id);
 
 # ── bot & intents ----------------------------------------------------------
 intents = discord.Intents.default()
@@ -166,13 +167,13 @@ class SettingGroup(app_commands.Group):
     @app_commands.describe(channel="Where to post end‑of‑activity notices")
     @app_commands.checks.has_permissions(administrator=True)
     async def channel(self, inter: discord.Interaction, channel: TextChannel):
-        await inter.response.defer(ephemeral=True)
+        # await inter.response.defer(ephemeral=True)
         await bot.db.execute(
             """
-            INSERT INTO guild_settings(guild_id, notify_channel_id)
+            INSERT INTO guild_settings (guild_id, notify_channel_id)
             VALUES (?, ?)
             ON CONFLICT(guild_id) DO UPDATE
-              SET notify_channel_id = excluded.notify_channel_id
+            SET notify_channel_id = excluded.notify_channel_id
             """,
             (inter.guild.id, channel.id),
         )
@@ -183,7 +184,7 @@ class SettingGroup(app_commands.Group):
     @app_commands.describe(offset="Hours from UTC, e.g. +8 or -5")
     @app_commands.checks.has_permissions(administrator=True)
     async def timezone(self, inter: discord.Interaction, offset: int):
-        await inter.response.defer(ephemeral=True)
+        # await inter.response.defer(ephemeral=True)
         await bot.db.execute(
             """
             INSERT INTO guild_settings(guild_id, timezone_offset)
@@ -196,7 +197,7 @@ class SettingGroup(app_commands.Group):
         await bot.db.commit()
         await inter.response.send_message(f"✅ Timezone offset set to UTC{offset:+d}", ephemeral=True)
 
-# bot.tree.add_command(SettingGroup())
+bot.tree.add_command(SettingGroup())
 
 # ── simple slash commands --------------------------------------------------
 @tree.command(name="ping", description="Latency check")
